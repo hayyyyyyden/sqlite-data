@@ -11,9 +11,53 @@
   import Testing
   import TestLocals
 
+  @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
+  private actor UploadDelegate: SyncEngineDelegate {
+    var scopes: [CKDatabase.Scope] = []
+    var savedIDs: [CKRecord.ID] = []
+    var failedIDs: [CKRecord.ID] = []
+
+    func syncEngine(
+      _ syncEngine: SyncEngine,
+      didSendRecords savedRecords: [CKRecord],
+      failedRecordSaves: [(record: CKRecord, error: CKError)],
+      deletedRecordIDs: [CKRecord.ID],
+      databaseScope: CKDatabase.Scope
+    ) async {
+      scopes.append(databaseScope)
+      savedIDs.append(contentsOf: savedRecords.map(\.recordID))
+      failedIDs.append(contentsOf: failedRecordSaves.map { $0.record.recordID })
+    }
+  }
+
   extension BaseCloudKitTests {
     @MainActor
     final class SyncEngineDelegateTests: BaseCloudKitTests, @unchecked Sendable {
+      @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
+      @Test($syncEngineDelegate.set(UploadDelegate()))
+      func uploadResultsAndQuotaRetry() async throws {
+        let delegate = try #require(syncEngineDelegate as? UploadDelegate)
+        let record = CKRecord(
+          recordType: "remindersLists", recordID: RemindersList.recordID(for: 1))
+        syncEngine.private.state.remove(pendingRecordZoneChanges: [.saveRecord(record.recordID)])
+
+        await syncEngine.handleSentRecordZoneChanges(
+          failedRecordSaves: [(record, CKError(.quotaExceeded))],
+          syncEngine: syncEngine.private
+        )
+
+        #expect(await delegate.scopes == [.private])
+        #expect(await delegate.failedIDs == [record.recordID])
+        #expect(
+          syncEngine.private.state.pendingRecordZoneChanges.contains(.saveRecord(record.recordID)))
+
+        syncEngine.private.state.remove(pendingRecordZoneChanges: [.saveRecord(record.recordID)])
+        await syncEngine.handleSentRecordZoneChanges(
+          savedRecords: [record], syncEngine: syncEngine.private
+        )
+        #expect(await delegate.savedIDs == [record.recordID])
+      }
+
       @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
 
       @Test($syncEngineDelegate.set(MyDelegate()))

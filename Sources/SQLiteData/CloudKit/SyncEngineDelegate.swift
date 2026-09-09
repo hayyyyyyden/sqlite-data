@@ -6,6 +6,15 @@
   /// An interface for observing ``SyncEngine`` events and customizing ``SyncEngine`` behavior.
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
   public protocol SyncEngineDelegate: AnyObject, Sendable {
+    /// Reports the server's result for a batch of record changes.
+    func syncEngine(
+      _ syncEngine: SyncEngine,
+      didSendRecords savedRecords: [CKRecord],
+      failedRecordSaves: [(record: CKRecord, error: CKError)],
+      deletedRecordIDs: [CKRecord.ID],
+      databaseScope: CKDatabase.Scope
+    ) async
+
     /// An event indicating a change to the device's iCloud account.
     ///
     /// By default, a sync engine will clear out local data when detecting a logout or account
@@ -83,6 +92,14 @@
 
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
   extension SyncEngineDelegate {
+    public func syncEngine(
+      _ syncEngine: SyncEngine,
+      didSendRecords savedRecords: [CKRecord],
+      failedRecordSaves: [(record: CKRecord, error: CKError)],
+      deletedRecordIDs: [CKRecord.ID],
+      databaseScope: CKDatabase.Scope
+    ) async {}
+
     public func syncEngine(
       _ syncEngine: SyncEngine,
       accountChanged changeType: CKSyncEngine.Event.AccountChange.ChangeType

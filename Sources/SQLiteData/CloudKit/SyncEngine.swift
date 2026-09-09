@@ -1807,6 +1807,13 @@
       failedRecordDeletes: [CKRecord.ID: CKError] = [:],
       syncEngine: any SyncEngineProtocol
     ) async {
+      await delegate?.syncEngine(
+        self,
+        didSendRecords: savedRecords,
+        failedRecordSaves: failedRecordSaves,
+        deletedRecordIDs: deletedRecordIDs,
+        databaseScope: syncEngine.database.databaseScope
+      )
       for savedRecord in savedRecords {
         await refreshLastKnownServerRecord(savedRecord)
       }
@@ -1830,6 +1837,9 @@
         }
 
         switch error.code {
+        case .quotaExceeded:
+          newPendingRecordZoneChanges.append(.saveRecord(failedRecord.recordID))
+
         case .serverRecordChanged:
           guard let serverRecord = error.serverRecord else { continue }
           await upsertFromServerRecord(serverRecord)
@@ -1943,7 +1953,7 @@
           .internalError, .partialFailure, .badContainer, .requestRateLimited, .missingEntitlement,
           .invalidArguments, .resultsTruncated, .assetFileNotFound,
           .assetFileModified, .incompatibleVersion, .constraintViolation, .changeTokenExpired,
-          .badDatabase, .quotaExceeded, .limitExceeded, .userDeletedZone, .tooManyParticipants,
+          .badDatabase, .limitExceeded, .userDeletedZone, .tooManyParticipants,
           .alreadyShared, .managedAccountRestricted, .participantMayNeedVerification,
           .serverResponseLost, .assetNotAvailable, .accountTemporarilyUnavailable:
           continue
