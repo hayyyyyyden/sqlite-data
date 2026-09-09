@@ -44,6 +44,15 @@
     private let notificationsObserver = LockIsolated<(any NSObjectProtocol)?>(nil)
     private let activityCounts = LockIsolated(ActivityCounts())
     private let startTask = LockIsolated<Task<Void, Never>?>(nil)
+    private let pendingRecordRecoveries = LockIsolated<[CKDatabase.Scope: PendingRecordRecovery]>(
+      [:])
+
+    private struct PendingRecordRecovery {
+      var runID: UUID?
+      var needsRecovery = false
+      var retryID: UUID?
+      var retryTask: Task<Void, Never>?
+    }
     #if DEBUG && canImport(DeveloperToolsSupport)
       private let previewTimerTask = LockIsolated<Task<Void, Never>?>(nil)
     #endif
@@ -430,6 +439,10 @@
     /// You must start the sync engine again using ``start()`` to synchronize the changes.
     public func stop() {
       guard isRunning else { return }
+      pendingRecordRecoveries.withValue { recoveries in
+        for recovery in recoveries.values { recovery.retryTask?.cancel() }
+        recoveries.removeAll()
+      }
       #if DEBUG && canImport(DeveloperToolsSupport)
         previewTimerTask.withValue {
           $0?.cancel()
@@ -1049,6 +1062,7 @@
           fetchingChangesCount += 1
         }
       case .didFetchChanges:
+        await recoverPendingRecords(syncEngine: syncEngine)
         await MainActor.run {
           fetchingChangesCount -= 1
         }
@@ -1528,59 +1542,14 @@
         }
       }
 
-      let unsyncedRecords =
-        await withErrorReporting(.sqliteDataCloudKitFailure) {
-          var unsyncedRecordIDs = try await userDatabase.write { db in
-            Set(
-              try UnsyncedRecordID.all
-                .fetchAll(db)
-                .map(CKRecord.ID.init(unsyncedRecordID:))
-            )
-          }
-          let modificationRecordIDs = Set(modifications.map(\.recordID))
-          let unsyncedRecordIDsToDelete = modificationRecordIDs.intersection(unsyncedRecordIDs)
-          unsyncedRecordIDs.subtract(modificationRecordIDs)
-          if !unsyncedRecordIDsToDelete.isEmpty {
-            try await userDatabase.write { db in
-              try UnsyncedRecordID
-                .findAll(unsyncedRecordIDsToDelete)
-                .delete()
-                .execute(db)
-            }
-          }
-          let batchSize = 150
-          let orderedUnsyncedRecordIDs = unsyncedRecordIDs.sorted {
-            topologicallyAscending(
-              lhsTableName: $0.tableName,
-              rhsTableName: $1.tableName,
-              rootFirst: true
-            )
-          }
-          var unsyncedRecords: [CKRecord] = []
-          for start in stride(from: 0, to: orderedUnsyncedRecordIDs.count, by: batchSize) {
-            let recordIDsBatch =
-              orderedUnsyncedRecordIDs
-              .dropFirst(start)
-              .prefix(batchSize)
-            let results = try await syncEngine.database.records(for: Array(recordIDsBatch))
-            for (recordID, result) in results {
-              switch result {
-              case .success(let record):
-                unsyncedRecords.append(record)
-              case .failure(let error as CKError) where error.code == .unknownItem:
-                try await userDatabase.write { db in
-                  try UnsyncedRecordID.find(recordID).delete().execute(db)
-                }
-              case .failure:
-                continue
-              }
-            }
-          }
-          return unsyncedRecords
-        }
-        ?? [CKRecord]()
+      await applyFetchedRecords(modifications, syncEngine: syncEngine)
+      await recoverPendingRecords(syncEngine: syncEngine)
+    }
 
-      let modifications = (modifications + unsyncedRecords).sorted { lhs, rhs in
+    private func applyFetchedRecords(
+      _ records: [CKRecord], syncEngine: any SyncEngineProtocol
+    ) async {
+      let modifications = records.sorted { lhs, rhs in
         topologicallyAscending(
           lhsTableName: lhs.recordType,
           rhsTableName: rhs.recordType,
@@ -1630,6 +1599,178 @@
             }
           }
         }
+      }
+    }
+
+    private func isCurrentSyncEngine(_ engine: any SyncEngineProtocol) -> Bool {
+      syncEngines.withValue {
+        switch engine.database.databaseScope {
+        case .private: $0.private === engine
+        case .shared: $0.shared === engine
+        default: false
+        }
+      }
+    }
+
+    private func recoverPendingRecords(syncEngine: any SyncEngineProtocol) async {
+      guard isCurrentSyncEngine(syncEngine) else { return }
+      let scope = syncEngine.database.databaseScope
+      let runID = UUID()
+      let canRun = pendingRecordRecoveries.withValue { recoveries in
+        recoveries[scope, default: PendingRecordRecovery()].needsRecovery = true
+        guard recoveries[scope]?.runID == nil, recoveries[scope]?.retryID == nil else {
+          return false
+        }
+        recoveries[scope]?.runID = runID
+        return true
+      }
+      guard canRun else { return }
+      var shouldRun = true
+      while shouldRun, isCurrentSyncEngine(syncEngine), !Task.isCancelled {
+        pendingRecordRecoveries.withValue { $0[scope]?.needsRecovery = false }
+        await recoverReadyRecords(syncEngine: syncEngine, runID: runID)
+        shouldRun = pendingRecordRecoveries.withValue { recoveries in
+          guard recoveries[scope]?.runID == runID else { return false }
+          if recoveries[scope]?.needsRecovery == true, recoveries[scope]?.retryID == nil {
+            return true
+          }
+          recoveries[scope]?.runID = nil
+          return false
+        }
+      }
+    }
+
+    private func recoverReadyRecords(syncEngine: any SyncEngineProtocol, runID: UUID) async {
+      var attemptedRecordIDs = Set<CKRecord.ID>()
+      while isCurrentSyncEngine(syncEngine), !Task.isCancelled {
+        let attempted = attemptedRecordIDs
+        let recordIDs: [CKRecord.ID] =
+          await withErrorReporting(.sqliteDataCloudKitFailure) {
+            try await userDatabase.write { db in
+              let pending = try UnsyncedRecordID.all.fetchAll(db)
+                .map(CKRecord.ID.init(unsyncedRecordID:))
+              let ordered = pending.filter {
+                container.database(for: $0).databaseScope == syncEngine.database.databaseScope
+                  && !attempted.contains($0)
+              }
+              .sorted { (lhs: CKRecord.ID, rhs: CKRecord.ID) in
+                if lhs.tableName == rhs.tableName { return lhs.recordName < rhs.recordName }
+                return topologicallyAscending(
+                  lhsTableName: lhs.tableName, rhsTableName: rhs.tableName, rootFirst: true
+                )
+              }
+              var batch: [CKRecord.ID] = []
+              for recordID in ordered {
+                if try dependenciesAreAvailable(for: recordID, in: db) { batch.append(recordID) }
+                if batch.count == 150 { break }
+              }
+              return batch
+            }
+          } ?? []
+        guard !recordIDs.isEmpty else { return }
+        attemptedRecordIDs.formUnion(recordIDs)
+        do {
+          let results = try await syncEngine.database.records(for: recordIDs)
+          guard isCurrentSyncEngine(syncEngine), !Task.isCancelled else { return }
+          var records: [CKRecord] = []
+          var retryDelay: TimeInterval?
+          for (recordID, result) in results {
+            switch result {
+            case .success(let record):
+              records.append(record)
+            case .failure(let error as CKError) where error.code == .unknownItem:
+              await withErrorReporting(.sqliteDataCloudKitFailure) {
+                try await userDatabase.write { db in
+                  try UnsyncedRecordID.find(recordID).delete().execute(db)
+                }
+              }
+            case .failure(let error):
+              reportIssue(error)
+              if let delay = Self.pendingRecordRetryDelay(for: error) {
+                retryDelay = max(retryDelay ?? 0, delay)
+              }
+            }
+          }
+          await applyFetchedRecords(records, syncEngine: syncEngine)
+          if let retryDelay {
+            schedulePendingRecordRecovery(after: retryDelay, syncEngine: syncEngine, runID: runID)
+            return
+          }
+        } catch {
+          guard isCurrentSyncEngine(syncEngine), !Task.isCancelled else { return }
+          reportIssue(error)
+          if let delay = Self.pendingRecordRetryDelay(for: error) {
+            schedulePendingRecordRecovery(after: delay, syncEngine: syncEngine, runID: runID)
+          }
+          return
+        }
+      }
+    }
+
+    private func dependenciesAreAvailable(for recordID: CKRecord.ID, in db: Database) throws -> Bool
+    {
+      guard let tableName = recordID.tableName,
+        let record = try SyncMetadata.find(recordID).fetchOne(db)?._lastKnownServerRecordAllFields
+      else { return true }
+      for foreignKey in foreignKeysByTableName[tableName] ?? [] {
+        guard let value = record.encryptedValues[foreignKey.from] else { continue }
+        let exists = try #sql(
+          """
+          SELECT EXISTS(
+            SELECT 1 FROM \(quote: foreignKey.table)
+            WHERE \(quote: foreignKey.to) = \(value.queryFragment)
+          )
+          """,
+          as: Bool.self
+        ).fetchOne(db)
+        if exists != true { return false }
+      }
+      return true
+    }
+
+    private func schedulePendingRecordRecovery(
+      after delay: TimeInterval, syncEngine: any SyncEngineProtocol, runID: UUID
+    ) {
+      @Dependency(\.continuousClock) var clock
+      let scope = syncEngine.database.databaseScope
+      let retryID = UUID()
+      func sleep<C: Clock>(using clock: C) -> @Sendable () async throws -> Void
+      where C.Duration == Duration {
+        let deadline = clock.now.advanced(by: .seconds(delay))
+        return { try await clock.sleep(until: deadline, tolerance: nil) }
+      }
+      let waitUntilRetry = sleep(using: clock)
+      pendingRecordRecoveries.withValue { recoveries in
+        guard recoveries[scope]?.runID == runID else { return }
+        recoveries[scope]?.retryID = retryID
+        recoveries[scope]?.retryTask = Task { [weak self] in
+          do { try await waitUntilRetry() } catch { return }
+          guard let self, !Task.isCancelled else { return }
+          let shouldResume = pendingRecordRecoveries.withValue { recoveries in
+            guard recoveries[scope]?.retryID == retryID else { return false }
+            recoveries[scope]?.retryID = nil
+            recoveries[scope]?.retryTask = nil
+            return true
+          }
+          if shouldResume { await recoverPendingRecords(syncEngine: syncEngine) }
+        }
+      }
+    }
+
+    package static func pendingRecordRetryDelay(for error: any Error) -> TimeInterval? {
+      guard let error = error as? CKError else { return nil }
+      if error.code == .partialFailure {
+        let nestedDelay = error.partialErrorsByItemID?.values
+          .compactMap { pendingRecordRetryDelay(for: $0) }.max()
+        return [error.retryAfterSeconds, nestedDelay].compactMap { $0 }.max()
+      }
+      if let retryAfter = error.retryAfterSeconds { return max(0.1, retryAfter) }
+      switch error.code {
+      case .requestRateLimited, .serviceUnavailable, .zoneBusy, .networkFailure,
+        .networkUnavailable:
+        return 5
+      default:
+        return nil
       }
     }
 
@@ -1994,6 +2135,11 @@
             } onConflictDoUpdate: { _ in
             }
             .execute(db)
+            if try T.unscoped.find(#sql("\(bind: metadata.recordPrimaryKey)")).fetchCount(db) == 0 {
+              try SyncMetadata.find(serverRecord.recordID)
+                .update { $0.setLastKnownServerRecord(serverRecord) }
+                .execute(db)
+            }
           }
         }
         try open(table)

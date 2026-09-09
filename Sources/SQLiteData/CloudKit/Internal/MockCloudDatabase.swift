@@ -12,6 +12,8 @@
     let dataManager = Dependency(\.dataManager)
 
     package struct State {
+      package var recordFetchBatches: [[CKRecord.ID]] = []
+      package var recordFetchErrors: [Int: CKError] = [:]
       private var lastRecordChangeTag = 0
       package var storage: [CKRecordZone.ID: Zone] = [:]
       var assets: [AssetID: Data] = [:]
@@ -75,6 +77,12 @@
       for ids: [CKRecord.ID],
       desiredKeys: [CKRecord.FieldKey]?
     ) throws -> [CKRecord.ID: Result<CKRecord, any Error>] {
+      try state.withValue {
+        $0.recordFetchBatches.append(ids)
+        if let error = $0.recordFetchErrors.removeValue(forKey: $0.recordFetchBatches.count) {
+          throw error
+        }
+      }
       let accountStatus = container.accountStatus()
       guard accountStatus == .available
       else { throw ckError(forAccountStatus: accountStatus) }
