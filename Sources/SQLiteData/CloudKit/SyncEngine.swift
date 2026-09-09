@@ -1625,6 +1625,11 @@
         return true
       }
       guard canRun else { return }
+      defer {
+        pendingRecordRecoveries.withValue { recoveries in
+          if recoveries[scope]?.runID == runID { recoveries[scope]?.runID = nil }
+        }
+      }
       var shouldRun = true
       while shouldRun, isCurrentSyncEngine(syncEngine), !Task.isCancelled {
         pendingRecordRecoveries.withValue { $0[scope]?.needsRecovery = false }

@@ -87,6 +87,30 @@
       }
 
       @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
+      @Test func cancelledFetchDoesNotBlockTheNextRecovery() async throws {
+        let parent = makeParent()
+        _ = try syncEngine.modifyRecords(scope: .private, saving: [parent])
+        try await syncEngine.modifyRecords(
+          scope: .private, saving: [makeChild(id: 1, parent: parent)]
+        ).notify()
+        try await userDatabase.write { db in
+          try RemindersList.insert { RemindersList(id: 1, title: "Personal") }.execute(db)
+        }
+        await syncEngine.handleEvent(.willFetchChanges, syncEngine: syncEngine.private)
+        await Task {
+          withUnsafeCurrentTask { $0?.cancel() }
+          await syncEngine.handleEvent(.didFetchChanges, syncEngine: syncEngine.private)
+        }.value
+        expectNoDifference(container.privateCloudDatabase.state.recordFetchBatches.count, 1)
+
+        await syncEngine.handleEvent(.willFetchChanges, syncEngine: syncEngine.private)
+        await syncEngine.handleEvent(.didFetchChanges, syncEngine: syncEngine.private)
+        let restored = try await userDatabase.read { try Reminder.fetchCount($0) }
+        expectNoDifference(restored, 1)
+        expectNoDifference(container.privateCloudDatabase.state.recordFetchBatches.count, 2)
+      }
+
+      @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
       @Test func emptyFetchRecoversExistingBacklogInTheCorrectDatabase() async throws {
         let parent = makeParent()
         _ = try syncEngine.modifyRecords(scope: .private, saving: [parent])
