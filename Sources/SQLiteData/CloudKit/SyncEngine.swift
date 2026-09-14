@@ -24,6 +24,55 @@
   /// See <doc:CloudKitSync> for more information.
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
   public final class SyncEngine: Observable, Sendable {
+    private let activeCallbacks = LockIsolated(0)
+
+    package func beginCallback(for engine: (any SyncEngineProtocol)? = nil) -> Bool {
+      syncEngines.withValue { engines in
+        guard engines.isRunning else { return false }
+        if let engine, engine !== engines.private && engine !== engines.shared { return false }
+        activeCallbacks.withValue { $0 += 1 }
+        return true
+      }
+    }
+
+    package func endCallback() { activeCallbacks.withValue { $0 -= 1 } }
+
+    /// Stops accepting callbacks and waits for admitted callbacks before a destructive reset.
+    /// Invoke this outside a delegate callback, after stopping the app's own database writers.
+    public func suspendForDataDeletion() async throws {
+      let startup = startTask.withValue { task in
+        let previous = task
+        task?.cancel()
+        task = nil
+        return previous
+      }
+      stop()
+      await startup?.value
+      @Dependency(\.continuousClock) var clock
+      while activeCallbacks.withValue({ $0 > 0 }) {
+        try await clock.sleep(for: .milliseconds(10))
+      }
+    }
+
+    /// Clears synchronized rows and progress without restarting CloudKit.
+    /// Call only after `suspendForDataDeletion()` and after blocking app-owned writes.
+    public func discardLocalData() async throws {
+      guard !isRunning, activeCallbacks.withValue({ $0 == 0 }) else {
+        throw CancellationError()
+      }
+      try tearDownSyncEngine()
+      try await userDatabase.write { db in
+        try #sql("PRAGMA defer_foreign_keys = ON").execute(db)
+        for table in tables.reversed() {
+          func open<T>(_: some SynchronizableTable<T>) throws {
+            try T.unscoped.delete().execute(db)
+          }
+          try open(table)
+        }
+        try setUpSyncEngine(writableDB: db)
+      }
+    }
+
     package let userDatabase: UserDatabase
     package let logger: Logger
     package let metadatabase: any DatabaseWriter
@@ -1011,6 +1060,8 @@
     }
 
     package func handleEvent(_ event: Event, syncEngine: any SyncEngineProtocol) async {
+      guard beginCallback(for: syncEngine) else { return }
+      defer { endCallback() }
       #if DEBUG
         logger.log(event, syncEngine: syncEngine)
       #endif
@@ -1034,6 +1085,8 @@
           deletions: deletions,
           syncEngine: syncEngine
         )
+        await delegate?.syncEngine(
+          self, didFetchRecords: modifications, databaseScope: syncEngine.database.databaseScope)
       case .sentRecordZoneChanges(
         let savedRecords,
         let failedRecordSaves,
@@ -1097,6 +1150,8 @@
       options: CKSyncEngine.SendChangesOptions = CKSyncEngine.SendChangesOptions(scope: .all),
       syncEngine: any SyncEngineProtocol
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
+      guard beginCallback(for: syncEngine) else { return nil }
+      defer { endCallback() }
       var changes = await pendingRecordZoneChanges(options: options, syncEngine: syncEngine)
       guard !changes.isEmpty
       else { return nil }
@@ -1144,6 +1199,11 @@
         }
       #endif
 
+      if syncEngine.database.databaseScope == .private,
+        let maximum = delegate?.maximumRecordZoneChangesPerBatch
+      {
+        changes = Array(changes.prefix(max(1, maximum)))
+      }
       let batch = await syncEngine.recordZoneChangeBatch(pendingChanges: changes) { recordID in
         guard
           let (metadata, allFields) = await withErrorReporting(
@@ -1248,7 +1308,24 @@
         }
         return await open(table)
       }
-      return batch
+      guard let batch, let delegate else { return batch }
+      let prepared =
+        await withErrorReporting(.sqliteDataCloudKitFailure) {
+          try await delegate.syncEngine(
+            self,
+            prepareRecordZoneChangeBatch: batch,
+            databaseScope: syncEngine.database.databaseScope
+          )
+        } ?? nil
+      guard let prepared else {
+        syncEngine.state.add(
+          pendingRecordZoneChanges:
+            batch.recordsToSave.map { .saveRecord($0.recordID) }
+            + batch.recordIDsToDelete.map { .deleteRecord($0) }
+        )
+        return nil
+      }
+      return prepared
     }
 
     private func pendingRecordZoneChanges(
@@ -1613,7 +1690,8 @@
     }
 
     private func recoverPendingRecords(syncEngine: any SyncEngineProtocol) async {
-      guard isCurrentSyncEngine(syncEngine) else { return }
+      guard beginCallback(for: syncEngine) else { return }
+      defer { endCallback() }
       let scope = syncEngine.database.databaseScope
       let runID = UUID()
       let canRun = pendingRecordRecoveries.withValue { recoveries in

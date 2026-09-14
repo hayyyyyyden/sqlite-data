@@ -6,6 +6,23 @@
   /// An interface for observing ``SyncEngine`` events and customizing ``SyncEngine`` behavior.
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
   public protocol SyncEngineDelegate: AnyObject, Sendable {
+    /// Limits each batch before records are materialized, leaving room for app-owned records.
+    var maximumRecordZoneChangesPerBatch: Int? { get }
+
+    /// Reports fetched records, including app-owned records not mapped to synchronized tables.
+    func syncEngine(
+      _ syncEngine: SyncEngine,
+      didFetchRecords records: [CKRecord],
+      databaseScope: CKDatabase.Scope
+    ) async
+
+    /// Adds app-owned preconditions to an upload, or returns nil to leave changes pending.
+    func syncEngine(
+      _ syncEngine: SyncEngine,
+      prepareRecordZoneChangeBatch batch: CKSyncEngine.RecordZoneChangeBatch,
+      databaseScope: CKDatabase.Scope
+    ) async throws -> CKSyncEngine.RecordZoneChangeBatch?
+
     /// Reports the server's result for a batch of record changes.
     func syncEngine(
       _ syncEngine: SyncEngine,
@@ -92,6 +109,22 @@
 
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
   extension SyncEngineDelegate {
+    public var maximumRecordZoneChangesPerBatch: Int? { nil }
+
+    public func syncEngine(
+      _ syncEngine: SyncEngine,
+      didFetchRecords records: [CKRecord],
+      databaseScope: CKDatabase.Scope
+    ) async {}
+
+    public func syncEngine(
+      _ syncEngine: SyncEngine,
+      prepareRecordZoneChangeBatch batch: CKSyncEngine.RecordZoneChangeBatch,
+      databaseScope: CKDatabase.Scope
+    ) async throws -> CKSyncEngine.RecordZoneChangeBatch? {
+      batch
+    }
+
     public func syncEngine(
       _ syncEngine: SyncEngine,
       didSendRecords savedRecords: [CKRecord],
