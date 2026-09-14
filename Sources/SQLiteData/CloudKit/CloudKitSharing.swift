@@ -180,20 +180,9 @@
         )
 
       configure(sharedRecord)
-      var batch = CKSyncEngine.RecordZoneChangeBatch(
-        recordsToSave: [sharedRecord, lastKnownServerRecord])
-      if let delegate {
-        guard
-          let prepared = try await delegate.syncEngine(
-            self, prepareRecordZoneChangeBatch: batch, databaseScope: .private)
-        else { throw CancellationError() }
-        batch = prepared
-      }
       let (saveResults, _) = try await container.privateCloudDatabase.modifyRecords(
-        saving: batch.recordsToSave,
-        deleting: batch.recordIDsToDelete,
-        savePolicy: .ifServerRecordUnchanged,
-        atomically: batch.atomicByZone
+        saving: [sharedRecord, lastKnownServerRecord],
+        deleting: []
       )
 
       let savedShare = try saveResults.values.compactMap { result in

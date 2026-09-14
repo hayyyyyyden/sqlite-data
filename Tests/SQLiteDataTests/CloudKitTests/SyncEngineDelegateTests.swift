@@ -31,24 +31,19 @@
   }
 
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
-  private actor BatchGuardDelegate: SyncEngineDelegate {
-    let maximumRecordZoneChangesPerBatch: Int? = 1
-    var allowed = false
-
-    func allowUploads() { allowed = true }
+  private actor ZoneDeletionDelegate: SyncEngineDelegate {
+    var deletedZoneIDs: [CKRecordZone.ID] = []
+    var remainingRows: Int?
 
     func syncEngine(
       _ syncEngine: SyncEngine,
-      prepareRecordZoneChangeBatch batch: CKSyncEngine.RecordZoneChangeBatch,
+      didDeleteRecordZones zoneIDs: [CKRecordZone.ID],
       databaseScope: CKDatabase.Scope
-    ) async throws -> CKSyncEngine.RecordZoneChangeBatch? {
-      guard allowed else { return nil }
-      var batch = batch
-      let zone = try #require(batch.recordsToSave.first?.recordID.zoneID)
-      batch.recordsToSave.append(
-        CKRecord(recordType: "guard", recordID: CKRecord.ID(recordName: "guard", zoneID: zone)))
-      batch.atomicByZone = true
-      return batch
+    ) async {
+      deletedZoneIDs += zoneIDs
+      remainingRows = try? await syncEngine.userDatabase.database.read { db in
+        try RemindersList.fetchCount(db)
+      }
     }
   }
 
@@ -85,32 +80,25 @@
       }
 
       @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
-      @Test($syncEngineDelegate.set(BatchGuardDelegate()))
-      func batchGuardPreservesPendingChangesAndAddsAtomicPrecondition() async throws {
-        let delegate = try #require(syncEngineDelegate as? BatchGuardDelegate)
+      @Test($syncEngineDelegate.set(ZoneDeletionDelegate()))
+      func zoneDeletionNotifiesAfterRemovingRowsAndNewZoneCanBeCreated() async throws {
+        let delegate = try #require(syncEngineDelegate as? ZoneDeletionDelegate)
         try await userDatabase.userWrite { db in
-          try db.seed {
-            RemindersList(id: 1, title: "First")
-            RemindersList(id: 2, title: "Second")
-          }
+          try db.seed { RemindersList(id: 1, title: "Old account") }
         }
-        let recordIDs = [1, 2].map { RemindersList.recordID(for: $0) }
-        syncEngine.private.state.add(pendingRecordZoneChanges: recordIDs.map { .saveRecord($0) })
-        let blocked = await syncEngine.nextRecordZoneChangeBatch(syncEngine: syncEngine.private)
-        #expect(blocked == nil)
-        for id in recordIDs {
-          #expect(syncEngine.private.state.pendingRecordZoneChanges.contains(.saveRecord(id)))
-        }
-
-        await delegate.allowUploads()
-        let batch = try #require(
-          await syncEngine.nextRecordZoneChangeBatch(syncEngine: syncEngine.private))
-        #expect(batch.atomicByZone)
-        expectNoDifference(batch.recordsToSave.count, 2)
-        expectNoDifference(batch.recordsToSave.filter { $0.recordType == "guard" }.count, 1)
-        expectNoDifference(
-          batch.recordsToSave.filter { $0.recordType == "remindersLists" }.count, 1)
-        syncEngine.private.state.remove(pendingRecordZoneChanges: recordIDs.map { .saveRecord($0) })
+        try await syncEngine.processPendingRecordZoneChanges(scope: .private)
+        let zoneID = syncEngine.defaultZone.zoneID
+        await syncEngine.handleFetchedDatabaseChanges(
+          modifications: [], deletions: [(zoneID: zoneID, reason: .deleted)],
+          syncEngine: syncEngine.private)
+        let deletedZoneIDs = await delegate.deletedZoneIDs
+        let remainingRows = await delegate.remainingRows
+        expectNoDifference(deletedZoneIDs, [zoneID])
+        expectNoDifference(remainingRows, 0)
+        #expect(
+          syncEngine.private.state.pendingDatabaseChanges.contains(
+            .saveZone(syncEngine.defaultZone)))
+        try await syncEngine.processPendingDatabaseChanges(scope: .private)
       }
 
       @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)

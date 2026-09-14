@@ -1085,8 +1085,6 @@
           deletions: deletions,
           syncEngine: syncEngine
         )
-        await delegate?.syncEngine(
-          self, didFetchRecords: modifications, databaseScope: syncEngine.database.databaseScope)
       case .sentRecordZoneChanges(
         let savedRecords,
         let failedRecordSaves,
@@ -1199,11 +1197,6 @@
         }
       #endif
 
-      if syncEngine.database.databaseScope == .private,
-        let maximum = delegate?.maximumRecordZoneChangesPerBatch
-      {
-        changes = Array(changes.prefix(max(1, maximum)))
-      }
       let batch = await syncEngine.recordZoneChangeBatch(pendingChanges: changes) { recordID in
         guard
           let (metadata, allFields) = await withErrorReporting(
@@ -1308,24 +1301,7 @@
         }
         return await open(table)
       }
-      guard let batch, let delegate else { return batch }
-      let prepared =
-        await withErrorReporting(.sqliteDataCloudKitFailure) {
-          try await delegate.syncEngine(
-            self,
-            prepareRecordZoneChangeBatch: batch,
-            databaseScope: syncEngine.database.databaseScope
-          )
-        } ?? nil
-      guard let prepared else {
-        syncEngine.state.add(
-          pendingRecordZoneChanges:
-            batch.recordsToSave.map { .saveRecord($0.recordID) }
-            + batch.recordIDsToDelete.map { .deleteRecord($0) }
-        )
-        return nil
-      }
-      return prepared
+      return batch
     }
 
     private func pendingRecordZoneChanges(
@@ -1505,6 +1481,14 @@
           }
         }
         ?? false
+      let deletedZoneIDs = deletions.compactMap { zoneID, reason in
+        reason == .deleted || reason == .purged ? zoneID : nil
+      }
+      if !deletedZoneIDs.isEmpty {
+        await delegate?.syncEngine(
+          self, didDeleteRecordZones: deletedZoneIDs,
+          databaseScope: syncEngine.database.databaseScope)
+      }
       if defaultZoneDeleted {
         syncEngine.state.add(pendingDatabaseChanges: [.saveZone(self.defaultZone)])
       }
