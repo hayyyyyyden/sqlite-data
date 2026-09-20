@@ -77,7 +77,7 @@
       configure: @Sendable (CKShare) -> Void
     ) async throws -> SharedRecord
     where T.TableColumns.PrimaryKey.QueryOutput: IdentifierStringConvertible {
-      guard isRunning
+      guard beginCallback()
       else {
         throw SharingError(
           reason: .syncEngineNotRunning,
@@ -87,6 +87,7 @@
             """
         )
       }
+      defer { endCallback() }
       guard tablesByName[T.tableName] != nil
       else {
         throw SharingError(
@@ -241,6 +242,8 @@
     }
 
     func unshare(share: CKShare) async throws {
+      guard beginCallback() else { throw CancellationError() }
+      defer { endCallback() }
       let result = try await syncEngines.private?.database.modifyRecords(
         saving: [],
         deleting: [share.recordID]
@@ -253,6 +256,8 @@
     /// This method should be invoked from various delegate methods on the scene delegate of the
     /// app. See <doc:CloudKitSharing#Accepting-shared-records> for more info.
     public func acceptShare(metadata: CKShare.Metadata) async throws {
+      guard beginCallback() else { throw CancellationError() }
+      defer { endCallback() }
       try await acceptShare(metadata: ShareMetadata(rawValue: metadata))
     }
   }

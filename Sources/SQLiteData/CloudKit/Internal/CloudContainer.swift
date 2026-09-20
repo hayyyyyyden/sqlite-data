@@ -61,7 +61,9 @@
       else {
         fatalError("This should never be called with 'ShareMetadata' that has a nil 'rawValue'")
       }
-      return try await self.accept(metadata)
+      return try await acceptCloudKitShare { completion in
+        self.accept(metadata, completionHandler: completion)
+      }
     }
 
     package static func createContainer(identifier containerIdentifier: String) -> Self {
@@ -84,6 +86,25 @@
           continuation.resume(with: result.map(ShareMetadata.init(rawValue:)))
         }
         add(operation)
+      }
+    }
+  }
+
+  @available(iOS 15, tvOS 15, macOS 12, watchOS 8, *)
+  package func acceptCloudKitShare(
+    _ operation: (@escaping @Sendable (CKShare?, (any Error)?) -> Void) -> Void
+  ) async throws -> CKShare {
+    // CloudKit can return neither a share nor an error. Its imported async overload traps
+    // when that happens, before the caller can handle the failure.
+    try await withCheckedThrowingContinuation { continuation in
+      operation { share, error in
+        if let error {
+          continuation.resume(throwing: error)
+        } else if let share {
+          continuation.resume(returning: share)
+        } else {
+          continuation.resume(throwing: CKError(.internalError))
+        }
       }
     }
   }
