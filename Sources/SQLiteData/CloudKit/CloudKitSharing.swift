@@ -180,7 +180,7 @@
         )
 
       configure(sharedRecord)
-      let (saveResults, _) = try await container.privateCloudDatabase.modifyRecords(
+      let (saveResults, _) = try await container.database(for: sharedRecord.recordID).modifyRecords(
         saving: [sharedRecord, lastKnownServerRecord],
         deleting: []
       )

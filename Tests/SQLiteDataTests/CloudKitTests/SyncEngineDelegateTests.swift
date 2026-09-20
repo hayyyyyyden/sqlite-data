@@ -128,7 +128,7 @@
 
       @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
 
-      @Test($syncEngineDelegate.set(MyDelegate()))
+      @Test(.taskLocal($syncEngineDelegate, MyDelegate()))
       func accountChanged() async throws {
         try await userDatabase.userWrite { db in
           try db.seed {
@@ -287,7 +287,7 @@
         try await syncEngine.processPendingDatabaseChanges(scope: .private)
       }
 
-      @Test($syncEngineDelegate.set(DefaultImplementationDelegate()))
+      @Test(.taskLocal($syncEngineDelegate, DefaultImplementationDelegate()))
       func accountChanged_DefaultImplementation() async throws {
         try await userDatabase.userWrite { db in
           try db.seed {
@@ -344,7 +344,7 @@
       wasCalled.withValue { $0 = true }
     }
     deinit {
-      guard wasCalled.withValue(\.self)
+      guard wasCalled.withValue(\.self) || Test.current == nil
       else {
         Issue.record("Delegate method 'syncEngine(_:accountChanged:)' was not called.")
         return

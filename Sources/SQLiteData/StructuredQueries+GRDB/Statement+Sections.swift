@@ -49,7 +49,7 @@ extension SelectStatement where QueryValue == (), Joins == () {
   }
 }
 
-extension Select {
+extension Select where From: StructuredQueriesCore.Table {
   /// Returns all values fetched from the database, grouped into sections.
   ///
   /// See ``StructuredQueriesCore/SelectStatement/fetchAll(_:sectionBy:)`` for more information.
@@ -141,5 +141,7 @@ private func sectionedResults<Value: QueryRepresentable, Key: QueryRepresentable
   query: QueryFragment
 ) throws -> ResultsSectionCollection<Value.QueryOutput, Key.QueryOutput>
 where Key.QueryOutput: Hashable {
-  try ResultsSectionCollection(cursor: QuerySectionedCursor<Value, Key>(db: db, query: query))
+  try ResultsSectionCollection(
+    cursor: QuerySectionedCursor<Value, Key>(db: db, query: query, cached: true)
+  )
 }
