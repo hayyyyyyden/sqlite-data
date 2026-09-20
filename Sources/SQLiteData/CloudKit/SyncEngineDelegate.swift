@@ -6,6 +6,22 @@
   /// An interface for observing ``SyncEngine`` events and customizing ``SyncEngine`` behavior.
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
   public protocol SyncEngineDelegate: AnyObject, Sendable {
+    /// Reports downloaded records before local database processing. This is not a commit receipt.
+    /// Keep this callback brief so observation does not delay synchronization.
+    func syncEngine(
+      _ syncEngine: SyncEngine,
+      didFetchRecords records: [CKRecord],
+      databaseScope: CKDatabase.Scope
+    ) async
+
+    /// Reports the original result of a record-zone fetch, including retry information in the error.
+    func syncEngine(
+      _ syncEngine: SyncEngine,
+      didFetchRecordZone zoneID: CKRecordZone.ID,
+      error: CKError?,
+      databaseScope: CKDatabase.Scope
+    ) async
+
     /// Reports zone deletions after their synchronized rows have been removed locally.
     func syncEngine(
       _ syncEngine: SyncEngine,
@@ -99,6 +115,19 @@
 
   @available(iOS 17, macOS 14, tvOS 17, watchOS 10, *)
   extension SyncEngineDelegate {
+    public func syncEngine(
+      _ syncEngine: SyncEngine,
+      didFetchRecords records: [CKRecord],
+      databaseScope: CKDatabase.Scope
+    ) async {}
+
+    public func syncEngine(
+      _ syncEngine: SyncEngine,
+      didFetchRecordZone zoneID: CKRecordZone.ID,
+      error: CKError?,
+      databaseScope: CKDatabase.Scope
+    ) async {}
+
     public func syncEngine(
       _ syncEngine: SyncEngine,
       didDeleteRecordZones zoneIDs: [CKRecordZone.ID],

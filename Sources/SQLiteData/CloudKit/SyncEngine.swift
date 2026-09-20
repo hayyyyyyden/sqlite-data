@@ -1080,6 +1080,9 @@
       case .sentDatabaseChanges:
         break
       case .fetchedRecordZoneChanges(let modifications, let deletions):
+        await delegate?.syncEngine(
+          self, didFetchRecords: modifications,
+          databaseScope: syncEngine.database.databaseScope)
         await handleFetchedRecordZoneChanges(
           modifications: modifications,
           deletions: deletions,
@@ -1103,7 +1106,10 @@
         await MainActor.run {
           fetchingChangesCount += 1
         }
-      case .didFetchRecordZoneChanges:
+      case .didFetchRecordZoneChanges(let zoneID, let error):
+        await delegate?.syncEngine(
+          self, didFetchRecordZone: zoneID, error: error,
+          databaseScope: syncEngine.database.databaseScope)
         await MainActor.run {
           fetchingChangesCount -= 1
         }
